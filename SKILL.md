@@ -82,6 +82,109 @@ This includes:
 
 ---
 
+## Phase 1c: Token Usage Analysis
+
+After knowledge capture, analyze token usage to identify optimization opportunities.
+
+### Process
+
+1. **Get conversation ID** - Find the most recent conversation file:
+   ```python
+   import os
+   from pathlib import Path
+
+   project_path = Path.cwd()
+   # Normalize path: /Users/foo/bar -> -Users-foo-bar
+   normalized = str(project_path).replace('/', '-')
+   if normalized.startswith('-'):
+       normalized = normalized[1:]
+
+   project_dir = Path.home() / '.claude/projects' / normalized
+   if project_dir.exists():
+       conversation_files = sorted(project_dir.glob('*.jsonl'),
+                                  key=lambda f: f.stat().st_mtime,
+                                  reverse=True)
+       if conversation_files:
+           conversation_id = conversation_files[0].stem  # UUID without .jsonl
+   ```
+
+2. **Run analysis** (only if conversation_id found):
+   ```bash
+   ~/bin/claude-cost analyze <conversation_id> --since-last --mark --top 15
+   ~/bin/claude-cost bash <conversation_id> --since-last --top 10
+   ```
+
+3. **Identify high-cost operations** (anything >5000 tokens):
+   - Test runs with verbose output
+   - Linting with full output
+   - Code searches (Grep/Glob) that could use language server
+   - Bash commands with unnecessary verbosity
+   - Large file reads that could be filtered
+
+### Optimization Patterns
+
+For each high-cost operation, consider creating a wrapper:
+
+**Tests with verbose output** → Create quiet wrapper:
+- Success: "✓ Tests passed (N passed)"
+- Failure: Show only failing tests
+- Example: See `~/src/claude-cost/run` command_test()
+
+**Linting with full output** → Create quiet wrapper:
+- Success: "✓ Linting passed"
+- Failure: Show only violations
+- Example: See `~/src/claude-cost/run` command_lint()
+
+**Code search heavy** → Suggest language server or narrow search patterns
+
+**Bash commands** → Create description-focused wrappers that capture output and summarize
+
+### Creation Bias
+
+For token optimization opportunities, **bias toward automatic creation**:
+- Don't ask "Would you like me to create...?"
+- Just create the wrapper tool/skill
+- Report what was created afterward
+- This is "aggressive improvement" mode for fast compounding optimization
+
+Only skip creation if:
+- The wrapper already exists
+- The operation was already marked as "rejected" in the improve log
+- There's genuine ambiguity about how to optimize it
+
+### Quiet Test Runner Template
+
+When creating a test wrapper, use this pattern:
+
+```python
+#!/usr/bin/env python3
+import subprocess
+import sys
+
+result = subprocess.run(
+    ['pytest', '-q', '--tb=short', '--disable-warnings'] + sys.argv[1:],
+    capture_output=True,
+    text=True
+)
+
+if result.returncode == 0:
+    passed = result.stdout.count('passed')
+    print(f'✓ Tests passed ({passed} passed)' if passed > 0 else '✓ Tests passed')
+else:
+    print('✗ Tests failed')
+    print(result.stdout)
+    if result.stderr:
+        print(result.stderr, file=sys.stderr)
+
+sys.exit(result.returncode)
+```
+
+### Output
+
+Only report if optimization tools/skills were created. Don't report if no high-cost operations found.
+
+---
+
 ## Phase 2: Tool & Skill Discovery
 
 **Bias toward creating. A small, imperfect tool is better than no tool.**
@@ -93,6 +196,8 @@ Run through this checklist actively:
 3. Did I discover a technique or pattern worth codifying as a reusable skill?
 4. Did I do something manually that could be automated?
 5. Did I have to look something up that a skill could encode as institutional knowledge?
+6. Did I use tokens on verbose output that could be quieted? (from Phase 1c analysis)
+7. Did I run the same command multiple times with noisy output?
 
 If ANY answer is yes, you have a candidate. There are two types of output:
 
@@ -141,6 +246,7 @@ Entry format (JSONL - one JSON object per line):
 {"timestamp": "2024-01-24T10:31:30Z", "type": "skill_created", "project": "/path/to/project", "skill": "debugging", "summary": "Codified systematic debugging approach"}
 {"timestamp": "2024-01-24T10:32:00Z", "type": "tool_rejected", "project": "/path/to/project", "tool": "db-cleanup", "description": "Tool to clean stale test databases"}
 {"timestamp": "2024-01-24T10:32:30Z", "type": "skill_rejected", "project": "/path/to/project", "skill": "api-patterns", "description": "REST API design patterns"}
+{"timestamp": "2024-01-24T10:33:00Z", "type": "token_optimization", "project": "/path/to/project", "tool": "quiet-test", "saved_tokens_estimate": 5000}
 ```
 
 **Create the output directory and log file on first run** if they don't exist.
@@ -149,19 +255,17 @@ Entry format (JSONL - one JSON object per line):
 
 ## Output Format
 
-Always produce output so the user knows improve ran:
+At start: "Running improve..."
 
-```
-## Improve Summary
+At end, only report positive actions:
+- If project knowledge added: "✓ Added project knowledge: [brief summary]"
+- If global advice added: "✓ Added global advice: [brief summary]"
+- If tool/skill created: "✓ Created [tool/skill name]: [brief purpose]"
 
-### Knowledge Capture (Project)
-[What was added to project claude.md, or "No new project knowledge to capture"]
+Do NOT report:
+- "No new project knowledge to capture"
+- "No new global advice"
+- "No tool or skill opportunities identified"
+- "Nothing to improve this session"
 
-### Knowledge Capture (Global)
-[What was added to ~/.claude/CLAUDE.md, or "No new global advice"]
-
-### Tool & Skill Discovery
-[Tool/skill suggestion + question, or "No tool or skill opportunities identified"]
-```
-
-If all three phases have nothing: "Nothing to improve this session."
+Silence is success. Only speak when something was created or improved.
